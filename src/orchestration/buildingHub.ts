@@ -1,0 +1,188 @@
+import { ModelCircuitBreaker } from "../core/circuitBreaker.js";
+import { shouldEscalate } from "../core/escalation.js";
+import type { InsightsStore } from "../core/insights.js";
+import { LoopDetector } from "../core/loopDetector.js";
+import { SagaRunner } from "../core/saga.js";
+import type { BuildContext, DeploymentStatus, ProjectSpec, Task, TaskResult, ValidationResult } from "../core/types.js";
+import type { ValidationGate } from "../core/validation.js";
+import type { ProjectConfig } from "../config/runtimeConfig.js";
+import type { DeployClient } from "../integration/deployClient.js";
+import type { GitHubClient } from "../integration/githubClient.js";
+import type { ServerClient } from "../integration/serverClient.js";
+import { TaskRouter } from "./providerRouter.js";
+
+interface BuildingHubDeps {
+  router: TaskRouter;
+  validation: ValidationGate;
+  breaker: ModelCircuitBreaker;
+  validateWithIndependentModel: (result: TaskResult, task: Task) => Promise<ValidationResult>;
+  autoFix: (result: TaskResult, issues: ValidationResult["issues"]) => Promise<TaskResult>;
+  githubClient: GitHubClient;
+  deployClient: DeployClient;
+  serverClient: ServerClient;
+  insightsStore?: InsightsStore;
+}
+
+export class BuildingHub {
+  private readonly loopDetector = new LoopDetector();
+  private readonly sagaRunner = new SagaRunner();
+
+  constructor(private readonly deps: BuildingHubDeps) {}
+
+  async executeWithRecovery(task: Task): Promise<TaskResult> {
+    const pre = this.deps.validation.preGeneration(task);
+    if (!pre.passed) throw new Error(`Pre-generation validation failed: ${JSON.stringify(pre.issues)}`);
+
+    const history: BuildContext["actionHistory"] = [];
+    for (let attempt = 1; attempt <= 3; attempt += 1) {
+      const provider = task.providerHint ?? this.deps.router.selectProvider(task.type);
+      try {
+        const generated = await this.deps.breaker.call(provider, task);
+        const post = this.deps.validation.postGeneration(generated.output);
+        if (!post.passed) return this.deps.autoFix(generated, post.issues);
+
+        const independent = await this.deps.validateWithIndependentModel(generated, task);
+        if (!independent.passed) return this.deps.autoFix(generated, independent.issues);
+
+        return generated;
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        history?.push({ action: "execute", error: message, codeDiff: "no-diff" });
+        const context: BuildContext = {
+          task,
+          retryCount: attempt,
+          modelConfidence: 0.5,
+          riskScore: task.type === "security" ? 0.8 : 0.3,
+          actionHistory: history,
+        };
+        if (this.loopDetector.detectLoop(context)) throw new Error(`Loop detected for task ${task.id}. Escalate to human review.`);
+        if (shouldEscalate(context) === "STOP_IMMEDIATE") throw new Error(`Escalated immediately for task ${task.id}. Human approval required.`);
+        if (attempt === 3) throw new Error(`Failed after 3 attempts: ${message}`);
+      }
+    }
+    throw new Error(`Unexpected execution state for task ${task.id}`);
+  }
+
+  async createAndInitializeProject(spec: ProjectSpec, project: ProjectConfig): Promise<{ files: { path: string; content: string }[] }> {
+    const task: Task = {
+      id: `project:init:${project.id}`,
+      type: "architecture",
+      prompt: `Create initial scaffold for ${project.name}. Repo: ${project.repoFullName}. Idea: ${spec.idea}`,
+    };
+    await this.executeWithRecovery(task);
+
+    const baseFiles = spec.files ?? [
+      { path: "README.md", content: `# ${project.name}\n\n${spec.description}\n` },
+      { path: "src/index.ts", content: "export const health = () => 'ok';\n" },
+    ];
+    return { files: baseFiles };
+  }
+
+  async createGitHubRepositoryAndPush(spec: ProjectSpec, project: ProjectConfig): Promise<{ fullName: string; branch: string }> {
+    const branch = spec.featureBranch ?? project.defaultBranch;
+    const initialized = await this.createAndInitializeProject(spec, project);
+
+    await this.deps.githubClient.pushFiles({
+      repoFullName: project.repoFullName,
+      branch,
+      files: initialized.files,
+      message: `chore(${project.id}): initialize/update project from Building Hub`,
+    });
+
+    return { fullName: project.repoFullName, branch };
+  }
+
+  async openPullRequest(spec: ProjectSpec, project: ProjectConfig): Promise<{ url: string }> {
+    const repo = await this.createGitHubRepositoryAndPush(spec, project);
+    const base = spec.baseBranch ?? project.defaultBranch;
+    const head = spec.featureBranch ?? `${project.id}/automation-${Date.now()}`;
+
+    if (head !== base) {
+      await this.deps.githubClient.createBranch({ repoFullName: repo.fullName, fromBranch: base, newBranch: head });
+    }
+
+    return this.deps.githubClient.createPullRequest({
+      repoFullName: repo.fullName,
+      title: `feat(${project.id}): bootstrap ${spec.name}`,
+      body: `Generated by Building Hub for ${project.name}. Idea: ${spec.idea}`,
+      head,
+      base,
+    });
+  }
+
+  async triggerDeployment(spec: ProjectSpec, project: ProjectConfig): Promise<DeploymentStatus> {
+    const repo = await this.createGitHubRepositoryAndPush(spec, project);
+    const target = project.deployTarget === "none" ? "vercel" : project.deployTarget;
+
+    if (project.deployTarget === "none") {
+      return { id: `skip-${Date.now()}`, target: "vercel", status: "failed" };
+    }
+
+    const deployment = await this.deps.deployClient.triggerDeployment({ target, repoFullName: repo.fullName, branch: repo.branch });
+    this.deps.insightsStore?.saveInsight({
+      projectId: project.id,
+      runType: "build_test_deploy",
+      worked: ["Project config routing", "Deploy adapter invocation"],
+      issues: deployment.status === "success" ? [] : ["Deployment not successful"],
+      unnecessarySteps: [],
+      createdAt: new Date().toISOString(),
+    });
+    return deployment;
+  }
+
+  async diagnoseAndRecoverDeployment(spec: ProjectSpec, project: ProjectConfig): Promise<{ recovered: boolean; details: string }> {
+    const steps = [
+      { id: "collect-logs", type: "read-only" as const, maxRetries: 1, execute: async () => this.deps.serverClient.getLogs(project.name) },
+      {
+        id: "restart-service",
+        type: "compensatable" as const,
+        maxRetries: 1,
+        execute: async () =>
+          this.deps.serverClient.deployService({
+            serviceName: project.name,
+            repoUrl: `https://github.com/${project.repoFullName}.git`,
+            branch: spec.baseBranch ?? project.defaultBranch,
+            buildCommand: "npm ci && npm run build",
+            startCommand: "npm run start",
+          }),
+      },
+    ];
+
+    const result = await this.sagaRunner.run(steps);
+    const failure = result.find((r) => r.error);
+    if (failure?.error) {
+      const context: BuildContext = {
+        task: { id: `recover:${project.id}`, type: "security", prompt: failure.error.message },
+        retryCount: 3,
+        modelConfidence: 0.5,
+        riskScore: 0.9,
+        actionHistory: [{ action: "recover", error: failure.error.message, codeDiff: "none" }],
+      };
+      const escalated = this.loopDetector.detectLoop(context) || shouldEscalate(context) !== "AUTONOMOUS";
+      this.deps.insightsStore?.saveInsight({
+        projectId: project.id,
+        runType: "other",
+        worked: ["Collected diagnostics"],
+        issues: [failure.error.message],
+        unnecessarySteps: escalated ? ["Repeated recover loop attempt"] : [],
+        createdAt: new Date().toISOString(),
+      });
+      if (escalated) return { recovered: false, details: `Escalated for human review (${project.id}): ${failure.error.message}` };
+      return { recovered: false, details: failure.error.message };
+    }
+
+    this.deps.insightsStore?.saveInsight({
+      projectId: project.id,
+      runType: "other",
+      worked: ["Log collection", "Service redeploy saga"],
+      issues: [],
+      unnecessarySteps: [],
+      createdAt: new Date().toISOString(),
+    });
+    return { recovered: true, details: `Recovered deployment for ${project.name}.` };
+  }
+
+  getProjectHealthReport(projectId: string) {
+    return this.deps.insightsStore?.buildHealthReport(projectId);
+  }
+}
