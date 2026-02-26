@@ -46,6 +46,34 @@ npm run dev
 - mitten: Code/Tests/Logs för aktivt projekt,
 - höger: pinned Arkitekt-chat, stateful per projekt.
 
+
+## Production (Hub)
+
+Kör från repo-roten.
+
+```bash
+npm ci
+npm run web:build
+PORT=3001 npm run web:start
+```
+
+> Not: `apps/web` är i nuläget mock-driven och använder inga miljövariabler i UI-koden.
+
+### Docker (för enkel server-deploy)
+
+Bygg och kör Hub-containern med medföljande compose-fil:
+
+```bash
+docker compose -f docker-compose.hub.yml build
+docker compose -f docker-compose.hub.yml up -d
+```
+
+Containern exponerar endast intern port `3000` (ingen host port mapping i default-konfig).
+
+### Bakom befintlig reverse proxy (Caddy)
+
+Om du redan har Caddy på samma nätverk kan den routa till tjänsten `hub:3000`, t.ex. via en `reverse_proxy hub:3000`-regel i din befintliga Caddy-konfiguration.
+
 ## Miljövariabler / hemligheter
 
 Dessa behövs i verklig runtime (injiceras via `RuntimeConfigProvider`):

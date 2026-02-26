@@ -1,0 +1,10 @@
+services:
+  hub:
+    build:
+      context: ./apps/web
+      dockerfile: Dockerfile
+    environment:
+      PORT: ${PORT:-3000}
+    expose:
+      - "3000"
+    restart: unless-stopped
