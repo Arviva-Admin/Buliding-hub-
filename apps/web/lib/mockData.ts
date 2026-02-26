@@ -43,6 +43,10 @@ export const projectData: Record<string, ProjectRuntimeData> = {
     ],
     code: `export async function deployArviva() {\n  return trigger('hetzner');\n}`,
     fileMeta: { path: "src/orchestration/buildingHub.ts", size: "14.2 KB", updatedAt: "2 min sedan", branch: "main", recentlyChanged: ["src/orchestration/buildingHub.ts", "src/core/insights.ts"] },
+    recentCommits: [
+      { id: "cmt-901", message: "Improve recovery timeout handling", author: "Arkitekten", time: "11:58" },
+      { id: "cmt-900", message: "Refactor pipeline status cards", author: "Kodare", time: "11:22" },
+    ],
   },
   "landing-page-x": {
     status: { build: "ok", test: "ok", deploy: "running", server: "warn" },
@@ -52,6 +56,9 @@ export const projectData: Record<string, ProjectRuntimeData> = {
     logs: [{ section: "deploy", severity: "info", message: "Triggered Vercel preview for branch main", time: "12:03:01" }],
     code: `export const hero = 'Landing Page X';`,
     fileMeta: { path: "src/hero.tsx", size: "3.1 KB", updatedAt: "6 min sedan", branch: "main", recentlyChanged: ["src/hero.tsx"] },
+    recentCommits: [
+      { id: "cmt-450", message: "Tune hero animation timing", author: "Designer", time: "12:01" },
+    ],
   },
   "demo-app": {
     status: { build: "ok", test: "ok", deploy: "warn", server: "warn" },
@@ -61,6 +68,7 @@ export const projectData: Record<string, ProjectRuntimeData> = {
     logs: [{ section: "deploy", severity: "warn", message: "Skipped (deployTarget=none)", time: "11:40:11" }],
     code: `export const demo = true;`,
     fileMeta: { path: "src/index.ts", size: "1.0 KB", updatedAt: "20 min sedan", branch: "main", recentlyChanged: [] },
+    recentCommits: [],
   },
 };
 

@@ -52,6 +52,13 @@ export interface TestResult {
   history: number[];
 }
 
+export interface CommitItem {
+  id: string;
+  message: string;
+  author: string;
+  time: string;
+}
+
 export interface ProjectRuntimeData {
   status: { build: Status; test: Status; deploy: Status; server: Status };
   agents: AgentState[];
@@ -60,6 +67,7 @@ export interface ProjectRuntimeData {
   logs: Array<{ section: "build" | "test" | "deploy" | "server"; severity: "info" | "warn" | "error"; message: string; time: string }>;
   code: string;
   fileMeta: { path: string; size: string; updatedAt: string; branch: string; recentlyChanged: string[] };
+  recentCommits?: CommitItem[];
 }
 
 export interface ProjectHealthView {
@@ -83,7 +91,6 @@ export interface ChatMessage {
   actions?: string[];
   timestamp: string;
 }
-
 
 export interface FailedRunItem {
   id: string;
